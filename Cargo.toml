@@ -1,0 +1,12 @@
+[package]
+name = "gomamayo"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+itertools = "0.12.1"
+lindera-core = "0.27.2"
+lindera-dictionary = { version = "0.27.2", features = ["unidic"] }
+lindera-tokenizer = { version = "0.27.2", features = ["unidic"] }
