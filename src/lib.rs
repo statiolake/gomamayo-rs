@@ -1,11 +1,15 @@
+use std::io::{self, Write};
+
 use itertools::Itertools;
 use lindera_core::{
     error::LinderaError,
     mode::{Mode, Penalty},
 };
-use lindera_dictionary::{DictionaryConfig, DictionaryKind};
+use lindera_dictionary::{DictionaryConfig, DictionaryKind, UserDictionaryConfig};
 use lindera_tokenizer::tokenizer::{Tokenizer, TokenizerConfig};
+use tempfile::Builder;
 
+const LINDERA_DETAIL_READING_COLUMN: usize = 6;
 const LINDERA_DETAIL_PRONOUNCIATION_COLUMN: usize = 9;
 
 pub type GomamayoResult<T, E = GomamayoError> = Result<T, E>;
@@ -18,6 +22,7 @@ pub struct UnknownPronounciationError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum GomamayoError {
+    IoError(io::Error),
     LinderaError(LinderaError),
     UnknownPronounciationError(UnknownPronounciationError),
 }
@@ -25,6 +30,12 @@ pub enum GomamayoError {
 impl From<LinderaError> for GomamayoError {
     fn from(value: LinderaError) -> Self {
         GomamayoError::LinderaError(value)
+    }
+}
+
+impl From<io::Error> for GomamayoError {
+    fn from(value: io::Error) -> Self {
+        GomamayoError::IoError(value)
     }
 }
 
@@ -41,14 +52,23 @@ pub struct GomamayoKind {
 }
 
 fn tokenize_to_pronounciations(input: &str) -> GomamayoResult<Vec<String>> {
+    // ユーザー辞書を一時ファイルに書き出す (Linderaではファイルを指定する必要があるため)
+    let mut user_jisyo_temp_file = Builder::new().suffix(".csv").tempfile()?;
+    user_jisyo_temp_file.write_all(include_bytes!("./user_jisyo.csv"))?;
+
     let dictionary = DictionaryConfig {
         kind: Some(DictionaryKind::UniDic),
         path: None,
     };
 
+    let user_dictionary = Some(UserDictionaryConfig {
+        kind: Some(DictionaryKind::UniDic),
+        path: user_jisyo_temp_file.path().to_owned(),
+    });
+
     let config = TokenizerConfig {
         dictionary,
-        user_dictionary: None,
+        user_dictionary,
         mode: Mode::Decompose(Penalty::default()),
     };
 
@@ -61,8 +81,19 @@ fn tokenize_to_pronounciations(input: &str) -> GomamayoResult<Vec<String>> {
             token
                 .get_details()
                 .and_then(|d| {
-                    d.get(LINDERA_DETAIL_PRONOUNCIATION_COLUMN)
-                        .map(|p| p.to_string())
+                    if let Some(p) = d.get(LINDERA_DETAIL_PRONOUNCIATION_COLUMN) {
+                        if *p != "*" {
+                            return Some(p.to_string());
+                        }
+                    }
+
+                    if let Some(r) = d.get(LINDERA_DETAIL_READING_COLUMN) {
+                        if *r != "*" {
+                            return Some(r.to_string());
+                        }
+                    }
+
+                    None
                 })
                 .ok_or_else(|| {
                     GomamayoError::UnknownPronounciationError(UnknownPronounciationError {
@@ -75,26 +106,46 @@ fn tokenize_to_pronounciations(input: &str) -> GomamayoResult<Vec<String>> {
     Ok(pronounciations)
 }
 
+fn into_moras(pronounciation: &str) -> Vec<String> {
+    let mut moras = vec![];
+    let mut curr = String::new();
+
+    for c in pronounciation.chars() {
+        if !"ャュョァィゥェォ".contains(c) && !curr.is_empty() {
+            moras.push(curr);
+            curr = String::new();
+        }
+
+        curr.push(c);
+    }
+
+    if !curr.is_empty() {
+        moras.push(curr);
+    }
+
+    moras
+}
+
 fn compute_ary_and_degree<S: AsRef<str>>(pronounciations: &[S]) -> (i32, i32) {
     let mut ary: i32 = 0;
-    let mut degree: i32 = 0;
+    let mut max_degree: i32 = 0;
 
     for (left, right) in pronounciations
         .iter()
-        .map(|s| s.as_ref().chars().collect_vec())
+        .map(|s| into_moras(s.as_ref()))
         .tuple_windows()
     {
-        let found_degree = (1..=left.len().min(right.len()))
+        let degree = (1..=left.len().min(right.len()))
             .rev()
             .find(|&d| left[left.len() - d..] == right[..d]);
 
-        if let Some(current_degree) = found_degree {
-            degree = degree.max(current_degree as i32);
+        if let Some(degree) = degree {
+            max_degree = max_degree.max(degree as i32);
             ary += 1;
         }
     }
 
-    (ary, degree)
+    (ary, max_degree)
 }
 
 pub fn analyze(input: &str) -> GomamayoResult<Gomamayo> {
@@ -145,7 +196,7 @@ mod tests {
         },
         TestCase {
             input: "世話やきキツネの仙狐さん",
-            expected_pronounciations: &["セワ", "ヤキ", "キツネ", "ノ", "セン", "キツネ", "サン"],
+            expected_pronounciations: &["セワ", "ヤキ", "キツネ", "ノ", "センコ", "サン"],
             expected_ary: 1,
             expected_degree: 1,
         },
@@ -163,7 +214,7 @@ mod tests {
         },
         TestCase {
             input: "博麗霊夢",
-            expected_pronounciations: &["ハク", "レー", "レーム"],
+            expected_pronounciations: &["ハクレー", "レーム"],
             expected_ary: 1,
             expected_degree: 2,
         },
@@ -209,6 +260,54 @@ mod tests {
             expected_ary: 0,
             expected_degree: 0,
         },
+        TestCase {
+            input: "パパイヤ",
+            expected_pronounciations: &["パパイヤ"],
+            expected_ary: 0,
+            expected_degree: 0,
+        },
+        TestCase {
+            input: "パパイヤジュース",
+            expected_pronounciations: &["パパイヤ", "ジュース"],
+            expected_ary: 0,
+            expected_degree: 0,
+        },
+        TestCase {
+            input: "無性生殖",
+            expected_pronounciations: &["ムセー", "セーショク"],
+            expected_ary: 1,
+            expected_degree: 2,
+        },
+        TestCase {
+            input: "部分分数分解",
+            expected_pronounciations: &["ブブン", "ブンスー", "ブンカイ"],
+            expected_ary: 1,
+            expected_degree: 2,
+        },
+        TestCase {
+            input: "モバイルルータ端末",
+            expected_pronounciations: &["モバイル", "ルータ", "タンマツ"],
+            expected_ary: 2,
+            expected_degree: 1,
+        },
+        TestCase {
+            input: "太鼓公募募集終了",
+            expected_pronounciations: &["タイコ", "コーボ", "ボシュー", "シューリョー"],
+            expected_ary: 3,
+            expected_degree: 2,
+        },
+        TestCase {
+            input: "多項高次ゴママヨ",
+            expected_pronounciations: &["タコー", "コージ", "ゴマ", "マヨ"],
+            expected_ary: 2,
+            expected_degree: 2,
+        },
+        TestCase {
+            input: "オレンジジュース",
+            expected_pronounciations: &["オレンジ", "ジュース"],
+            expected_ary: 0,
+            expected_degree: 0,
+        },
     ];
 
     #[test]
@@ -219,6 +318,17 @@ mod tests {
                 case.expected_pronounciations,
             );
         }
+    }
+
+    #[test]
+    fn test_into_moras() {
+        assert_eq!(
+            into_moras("オレンジジュース"),
+            ["オ", "レ", "ン", "ジ", "ジュ", "ー", "ス"]
+        );
+        assert_eq!(into_moras("シャワー"), ["シャ", "ワ", "ー"]);
+        assert_eq!(into_moras("ボシュー"), ["ボ", "シュ", "ー"]);
+        assert_eq!(into_moras("シューリョー"), ["シュ", "ー", "リョ", "ー"]);
     }
 
     #[test]

@@ -10,3 +10,4 @@ itertools = "0.12.1"
 lindera-core = "0.27.2"
 lindera-dictionary = { version = "0.27.2", features = ["unidic"] }
 lindera-tokenizer = { version = "0.27.2", features = ["unidic"] }
+tempfile = "3.10.0"
